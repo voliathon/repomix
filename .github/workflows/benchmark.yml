@@ -16,6 +16,9 @@ on:
         required: false
         default: '50'
 
+permissions:
+  contents: read
+
 jobs:
   memory-test:
     name: Memory Test
@@ -26,6 +29,8 @@ jobs:
         working-directory: scripts/memory
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
           node-version-file: .tool-versions
@@ -54,12 +59,11 @@ jobs:
 
       # Run memory test
       - name: Run memory test
-        run: |
-          ITERATIONS=${{ github.event.inputs.iterations || '50' }}
-          DELAY=${{ github.event.inputs.delay || '50' }}
-          node --expose-gc dist/memory-test.js $ITERATIONS $DELAY
+        run: node --expose-gc dist/memory-test.js "$ITERATIONS" "$DELAY"
         env:
           CI: true
+          ITERATIONS: ${{ github.event.inputs.iterations || '50' }}
+          DELAY: ${{ github.event.inputs.delay || '50' }}
 
       # Upload memory test results if available
       - name: Upload memory test results
@@ -81,6 +85,8 @@ jobs:
         working-directory: scripts/memory
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
           node-version-file: .tool-versions
