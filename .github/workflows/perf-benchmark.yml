@@ -1,0 +1,252 @@
+name: Performance Benchmark
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: perf-benchmark-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  post-pending:
+    name: Post Pending Comment
+    runs-on: ubuntu-latest
+    if: ${{ github.event.pull_request.head.repo.fork == false }}
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post or update pending comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          COMMENT_MARKER="<!-- repomix-perf-benchmark -->"
+          BODY="${COMMENT_MARKER}
+          ## ⚡ Performance Benchmark
+
+          <table><tr><td><strong>Latest commit:</strong></td><td><code>${SHORT_SHA}</code></td></tr>
+          <tr><td><strong>Status:</strong></td><td>⚡ Benchmark in progress...</td></tr></table>
+
+          [Workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+
+          # Find existing comment by marker
+          COMMENT_ID=$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" --paginate --jq ".[] | select(.body | startswith(\"${COMMENT_MARKER}\")) | .id" | head -1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api "repos/${GH_REPO}/issues/comments/${COMMENT_ID}" -X PATCH -f body="$BODY"
+          else
+            gh pr comment "$PR_NUMBER" --body "$BODY"
+          fi
+
+  benchmark:
+    name: Benchmark (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runs: 10
+          - os: macos-latest
+            runs: 20
+          - os: windows-latest
+            runs: 10
+    steps:
+      # Checkout PR branch and main branch into separate directories for isolation
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: pr-branch
+          persist-credentials: false
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          path: main-branch
+          persist-credentials: false
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version-file: pr-branch/.tool-versions
+          cache: npm
+          cache-dependency-path: |
+            pr-branch/package-lock.json
+            main-branch/package-lock.json
+
+      - name: Install and build (PR branch)
+        working-directory: pr-branch
+        run: npm ci && npm run build
+
+      - name: Install and build (main branch)
+        working-directory: main-branch
+        run: npm ci && npm run build
+
+      - name: Run benchmark
+        shell: bash
+        env:
+          BENCH_RUNS: ${{ matrix.runs }}
+        run: |
+          cat > "$RUNNER_TEMP/benchmark.mjs" << 'BENCHSCRIPT'
+          import { execFileSync } from 'node:child_process';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          import { writeFileSync } from 'node:fs';
+
+          const [prDir, mainDir] = process.argv.slice(2);
+          const output = join(tmpdir(), 'repomix-bench-output.txt');
+          const runs = Number(process.env.BENCH_RUNS) || 10;
+
+          function benchmark(dir) {
+            const bin = join(dir, 'bin', 'repomix.cjs');
+
+            // Warmup runs to stabilize OS page cache and JIT
+            for (let i = 0; i < 2; i++) {
+              try {
+                execFileSync(process.execPath, [bin, dir, '--output', output], { stdio: 'ignore' });
+              } catch {}
+            }
+
+            // Measurement runs
+            const times = [];
+            for (let i = 0; i < runs; i++) {
+              const start = Date.now();
+              execFileSync(process.execPath, [bin, dir, '--output', output], { stdio: 'ignore' });
+              times.push(Date.now() - start);
+            }
+
+            times.sort((a, b) => a - b);
+            const median = times[Math.floor(times.length / 2)];
+            // IQR: Q3 - Q1 (interquartile range)
+            const q1 = times[Math.floor(times.length * 0.25)];
+            const q3 = times[Math.floor(times.length * 0.75)];
+            const iqr = q3 - q1;
+            return { median, iqr };
+          }
+
+          console.error('Benchmarking PR branch...');
+          const pr = benchmark(prDir);
+          console.error(`PR median: ${pr.median}ms (±${pr.iqr}ms)`);
+
+          console.error('Benchmarking main branch...');
+          const main = benchmark(mainDir);
+          console.error(`main median: ${main.median}ms (±${main.iqr}ms)`);
+
+          const result = { pr: pr.median, prIqr: pr.iqr, main: main.median, mainIqr: main.iqr };
+          writeFileSync(join(process.env.RUNNER_TEMP, 'bench-result.json'), JSON.stringify(result));
+          BENCHSCRIPT
+
+          node "$RUNNER_TEMP/benchmark.mjs" "$GITHUB_WORKSPACE/pr-branch" "$GITHUB_WORKSPACE/main-branch"
+
+      - name: Upload benchmark result
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: bench-result-${{ matrix.os }}
+          path: ${{ runner.temp }}/bench-result.json
+          retention-days: 1
+
+  comment:
+    name: Comment Results
+    needs: benchmark
+    runs-on: ubuntu-latest
+    if: ${{ always() && !cancelled() }}
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          path: results
+          pattern: bench-result-*
+
+      - name: Generate benchmark report
+        id: report
+        env:
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+
+          generate_row() {
+            local os=$1
+            local label=$2
+            local file="results/bench-result-${os}/bench-result.json"
+
+            if [ ! -f "$file" ]; then
+              echo "<tr><td><strong>${label}:</strong></td><td>-</td></tr>"
+              return
+            fi
+
+            local data
+            data=$(node -e "console.log(JSON.stringify(JSON.parse(require('fs').readFileSync('$file','utf8'))))")
+
+            local pr_ms main_ms pr_iqr main_iqr
+            pr_ms=$(node -e "console.log(JSON.parse('$data').pr)")
+            main_ms=$(node -e "console.log(JSON.parse('$data').main)")
+            pr_iqr=$(node -e "console.log(JSON.parse('$data').prIqr)")
+            main_iqr=$(node -e "console.log(JSON.parse('$data').mainIqr)")
+
+            local diff=$((pr_ms - main_ms))
+            local pr_sec main_sec pr_iqr_sec main_iqr_sec diff_sec diff_pct
+            pr_sec=$(awk "BEGIN {printf \"%.2f\", $pr_ms / 1000}")
+            main_sec=$(awk "BEGIN {printf \"%.2f\", $main_ms / 1000}")
+            pr_iqr_sec=$(awk "BEGIN {printf \"%.2f\", $pr_iqr / 1000}")
+            main_iqr_sec=$(awk "BEGIN {printf \"%.2f\", $main_iqr / 1000}")
+            diff_sec=$(awk "BEGIN {printf \"%+.2f\", $diff / 1000}")
+
+            if [ "$main_ms" -gt 0 ]; then
+              diff_pct=$(awk "BEGIN {printf \"%+.1f\", ($diff / $main_ms) * 100}")
+            else
+              diff_pct="N/A"
+            fi
+
+            echo "<tr><td><strong>${label}:</strong></td><td>${main_sec}s (±${main_iqr_sec}s) → ${pr_sec}s (±${pr_iqr_sec}s) · ${diff_sec}s (${diff_pct}%)</td></tr>"
+          }
+
+          BODY="## ⚡ Performance Benchmark
+
+          <table><tr><td><strong>Latest commit:</strong></td><td><code>${SHORT_SHA}</code></td></tr>
+          <tr><td><strong>Status:</strong></td><td>✅ Benchmark complete!</td></tr>
+          $(generate_row "ubuntu-latest" "Ubuntu")
+          $(generate_row "macos-latest" "macOS")
+          $(generate_row "windows-latest" "Windows")
+          </table>
+
+          <details>
+          <summary>Details</summary>
+
+          - Packing the repomix repository with \`node bin/repomix.cjs\`
+          - Warmup: 2 runs (discarded)
+          - Measurement: 10 runs / 20 on macOS (median ± IQR)
+          - [Workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
+
+          </details>"
+
+          echo "$BODY" >> "$GITHUB_STEP_SUMMARY"
+
+          # Save report for comment step
+          echo "$BODY" > "$RUNNER_TEMP/benchmark-report.md"
+
+      - name: Comment on PR
+        if: ${{ github.event.pull_request.head.repo.fork == false }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          COMMENT_MARKER="<!-- repomix-perf-benchmark -->"
+          BODY="${COMMENT_MARKER}
+          $(cat "$RUNNER_TEMP/benchmark-report.md")"
+
+          # Find existing comment by marker
+          COMMENT_ID=$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" --paginate --jq ".[] | select(.body | startswith(\"${COMMENT_MARKER}\")) | .id" | head -1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api "repos/${GH_REPO}/issues/comments/${COMMENT_ID}" -X PATCH -f body="$BODY"
+          else
+            gh pr comment "$PR_NUMBER" --body "$BODY"
+          fi

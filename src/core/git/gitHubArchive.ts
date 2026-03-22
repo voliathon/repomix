@@ -112,7 +112,7 @@ const downloadAndExtractArchive = async (
   deps: ArchiveDownloadDeps = defaultDeps,
 ): Promise<void> => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  const timeoutId = setTimeout(controller.abort.bind(controller), timeout);
 
   try {
     const response = await deps.fetch(archiveUrl, {
@@ -130,7 +130,7 @@ const downloadAndExtractArchive = async (
     let downloaded = 0;
     let lastProgressUpdate = 0;
 
-    const nodeStream = Readable.fromWeb(response.body);
+    const nodeStream = Readable.fromWeb(response.body as import('node:stream/web').ReadableStream);
 
     // Transform stream for progress tracking
     const progressStream = new deps.Transform({
