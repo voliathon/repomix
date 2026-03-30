@@ -7,6 +7,7 @@ vi.mock('node:fs/promises');
 vi.mock('fs/promises');
 vi.mock('../../src/core/metrics/TokenCounter.js', () => {
   return {
+    TOKEN_ENCODINGS: ['o200k_base', 'cl100k_base', 'p50k_base', 'p50k_edit', 'r50k_base'],
     TokenCounter: vi.fn().mockImplementation(() => ({
       countTokens: vi.fn().mockReturnValue(10),
       free: vi.fn(),
@@ -53,6 +54,10 @@ describe('packager', () => {
       }),
       produceOutput: vi.fn().mockResolvedValue({
         outputForMetrics: mockOutput,
+      }),
+      createMetricsTaskRunner: vi.fn().mockReturnValue({
+        run: vi.fn().mockResolvedValue(0),
+        cleanup: vi.fn().mockResolvedValue(undefined),
       }),
       calculateMetrics: vi.fn().mockResolvedValue({
         totalFiles: 2,
@@ -107,6 +112,7 @@ describe('packager', () => {
       mockConfig,
       undefined,
       undefined,
+      expect.objectContaining({ taskRunner: expect.anything() }),
     );
 
     // Check the result of pack function
