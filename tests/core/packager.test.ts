@@ -26,10 +26,6 @@ describe('packager', () => {
       { path: 'file1.txt', content: 'raw content 1' },
       { path: file2Path, content: 'raw content 2' },
     ];
-    const mockSafeRawFiles = [
-      { path: 'file1.txt', content: 'safed content 1' },
-      { path: file2Path, content: 'safed content 2' },
-    ];
     const mockProcessedFiles = [
       { path: 'file1.txt', content: 'processed content 1' },
       { path: file2Path, content: 'processed content 2' },
@@ -47,7 +43,7 @@ describe('packager', () => {
       processFiles: vi.fn().mockReturnValue(mockProcessedFiles),
       validateFileSafety: vi.fn().mockResolvedValue({
         safeFilePaths: mockFilePaths,
-        safeRawFiles: mockSafeRawFiles,
+        safeRawFiles: mockRawFiles,
         suspiciousFilesResults: [],
         suspiciousGitDiffResults: [],
         suspiciousGitLogResults: [],
@@ -56,8 +52,11 @@ describe('packager', () => {
         outputForMetrics: mockOutput,
       }),
       createMetricsTaskRunner: vi.fn().mockReturnValue({
-        run: vi.fn().mockResolvedValue(0),
-        cleanup: vi.fn().mockResolvedValue(undefined),
+        taskRunner: {
+          run: vi.fn().mockResolvedValue(0),
+          cleanup: vi.fn().mockResolvedValue(undefined),
+        },
+        warmupPromise: Promise.resolve(),
       }),
       calculateMetrics: vi.fn().mockResolvedValue({
         totalFiles: 2,
@@ -94,7 +93,7 @@ describe('packager', () => {
       undefined,
       undefined,
     );
-    expect(mockDeps.processFiles).toHaveBeenCalledWith(mockSafeRawFiles, mockConfig, progressCallback);
+    expect(mockDeps.processFiles).toHaveBeenCalledWith(mockRawFiles, mockConfig, progressCallback);
     expect(mockDeps.produceOutput).toHaveBeenCalledWith(
       ['root'],
       mockConfig,
@@ -104,16 +103,21 @@ describe('packager', () => {
       undefined,
       progressCallback,
       [{ rootLabel: 'root', files: mockFilePaths }],
+      undefined,
     );
     expect(mockDeps.calculateMetrics).toHaveBeenCalledWith(
       mockProcessedFiles,
-      mockOutput,
+      expect.anything(),
       progressCallback,
       mockConfig,
       undefined,
       undefined,
       expect.objectContaining({ taskRunner: expect.anything() }),
     );
+
+    // Verify that calculateMetrics received a promise that resolves to the expected output
+    const outputArg = mockDeps.calculateMetrics.mock.calls[0][1];
+    await expect(outputArg).resolves.toBe(mockOutput);
 
     // Check the result of pack function
     expect(result.totalFiles).toBe(2);

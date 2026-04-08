@@ -56,8 +56,11 @@ describe('packager split output', () => {
       produceOutput,
       calculateMetrics,
       createMetricsTaskRunner: vi.fn().mockReturnValue({
-        run: vi.fn().mockResolvedValue(0),
-        cleanup: vi.fn().mockResolvedValue(undefined),
+        taskRunner: {
+          run: vi.fn().mockResolvedValue(0),
+          cleanup: vi.fn().mockResolvedValue(undefined),
+        },
+        warmupPromise: Promise.resolve(),
       }),
     });
 
@@ -70,17 +73,22 @@ describe('packager split output', () => {
       undefined,
       expect.any(Function),
       [{ rootLabel: 'root', files: allFilePaths }],
+      undefined,
     );
 
     expect(calculateMetrics).toHaveBeenCalledWith(
       processedFiles,
-      ['x'.repeat(10), 'x'.repeat(10)],
+      expect.anything(),
       expect.anything(),
       mockConfig,
       undefined,
       undefined,
       expect.objectContaining({ taskRunner: expect.anything() }),
     );
+
+    // Verify that calculateMetrics received a promise that resolves to the expected split output
+    const outputArg = calculateMetrics.mock.calls[0][1];
+    await expect(outputArg).resolves.toEqual(['x'.repeat(10), 'x'.repeat(10)]);
 
     expect(result.outputFiles).toEqual(['repomix-output.1.xml', 'repomix-output.2.xml']);
   });
