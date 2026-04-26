@@ -1,10 +1,11 @@
 import { GptEncoding } from 'gpt-tokenizer/GptEncoding';
 import { resolveEncodingAsync } from 'gpt-tokenizer/resolveEncodingAsync';
 import { logger } from '../../shared/logger.js';
+import { TOKEN_ENCODINGS, type TokenEncoding } from './tokenEncodings.js';
 
-// Supported token encoding types (OpenAI encoding names)
-export const TOKEN_ENCODINGS = ['o200k_base', 'cl100k_base', 'p50k_base', 'p50k_edit', 'r50k_base'] as const;
-export type TokenEncoding = (typeof TOKEN_ENCODINGS)[number];
+// Re-export for backward compatibility with existing
+// `import { TOKEN_ENCODINGS, TokenEncoding } from './TokenCounter.js'` call sites.
+export { TOKEN_ENCODINGS, type TokenEncoding };
 
 interface CountTokensOptions {
   disallowedSpecial?: Set<string>;
@@ -19,7 +20,9 @@ const PLAIN_TEXT_OPTIONS: CountTokensOptions = { disallowedSpecial: new Set() };
 // Lazy-loaded countTokens functions keyed by encoding
 const encodingModules = new Map<string, CountTokensFn>();
 
-const loadEncoding = async (encodingName: TokenEncoding): Promise<CountTokensFn> => {
+type LoadEncodingFn = (encodingName: TokenEncoding) => Promise<CountTokensFn>;
+
+const loadEncoding: LoadEncodingFn = async (encodingName) => {
   const cached = encodingModules.get(encodingName);
   if (cached) {
     return cached;
@@ -44,13 +47,20 @@ const loadEncoding = async (encodingName: TokenEncoding): Promise<CountTokensFn>
 export class TokenCounter {
   private countFn: CountTokensFn | null = null;
   private readonly encodingName: TokenEncoding;
+  private readonly deps: { loadEncoding: LoadEncodingFn };
 
-  constructor(encodingName: TokenEncoding) {
+  constructor(
+    encodingName: TokenEncoding,
+    deps: { loadEncoding: LoadEncodingFn } = {
+      loadEncoding,
+    },
+  ) {
     this.encodingName = encodingName;
+    this.deps = deps;
   }
 
   async init(): Promise<void> {
-    this.countFn = await loadEncoding(this.encodingName);
+    this.countFn = await this.deps.loadEncoding(this.encodingName);
   }
 
   public countTokens(content: string, filePath?: string): number {
